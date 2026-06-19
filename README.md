@@ -36,9 +36,10 @@ La cámara, geolocalización y Web Workers deben probarse desde `localhost` o un
 
 ## Integrantes
 
-* [Nombre del integrante 1]
-* [Nombre del integrante 2]
-* [Nombre del integrante 3]
+* Jose Paulino Colocho Baños        - CB11002
+* Luis Fernando Gonzalez Castaneda  - GC23100
+* 
+* 
 
 ## Uso académico
 
