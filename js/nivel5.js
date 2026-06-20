@@ -1,6 +1,9 @@
 const nivel5 = {
     elementos: {},
     worker: null,
+    urlWorkerBlob: null,
+    usandoWorkerBlob: false,
+    bufferRespaldo: null,
     totalRegistros: 250000,
     resultados: null,
     confeti: [],
@@ -36,28 +39,189 @@ const nivel5 = {
     },
 
     iniciarProcesamiento() {
-        if (!window.Worker) {
-            this.mostrarMensaje("Tu navegador no soporta Web Workers.", "danger");
-            mostrarIntentoFallido("Web Worker no disponible");
-            return;
-        }
-
         this.terminarWorkerActual();
         this.reiniciarInterfazProcesamiento();
 
         const datos = this.generarDatos();
+        this.bufferRespaldo = datos.buffer.slice(0);
         this.elementos.cantidadRegistros.textContent = `Registros generados: ${this.totalRegistros}`;
 
-        this.worker = new Worker("js/workerNivel5.js");
+        if (!window.Worker) {
+            this.mostrarMensaje("Tu navegador no soporta Web Workers. Procesando en modo alternativo...", "warning");
+            this.procesarDatosSinWorker(this.bufferRespaldo);
+            return;
+        }
+
+        this.iniciarWorkerExterno(datos.buffer);
+    },
+
+    iniciarWorkerExterno(buffer) {
+        try {
+            const worker = new Worker(this.obtenerRutaWorkerExterno());
+            this.usandoWorkerBlob = false;
+            this.configurarWorker(worker, buffer);
+        } catch (error) {
+            this.iniciarWorkerBlob(buffer);
+        }
+    },
+
+    obtenerRutaWorkerExterno() {
+        const scriptNivel5 = document.querySelector('script[src$="nivel5.js"]');
+
+        if (scriptNivel5 && scriptNivel5.src) {
+            return new URL("workerNivel5.js", scriptNivel5.src).href;
+        }
+
+        return "js/workerNivel5.js";
+    },
+
+    iniciarWorkerBlob(buffer) {
+        const bufferSeguro = buffer && buffer.byteLength > 0 ? buffer : this.obtenerBufferRespaldo();
+
+        if (!bufferSeguro) {
+            this.procesarErrorDefinitivo("No hay datos disponibles para procesar.");
+            return;
+        }
+
+        try {
+            const blob = new Blob([this.obtenerCodigoWorker()], {
+                type: "application/javascript"
+            });
+
+            this.urlWorkerBlob = URL.createObjectURL(blob);
+            const worker = new Worker(this.urlWorkerBlob);
+            this.usandoWorkerBlob = true;
+            this.configurarWorker(worker, bufferSeguro);
+            this.mostrarMensaje("El Worker externo no pudo cargarse. Se está usando un Worker interno de respaldo...", "warning");
+        } catch (error) {
+            this.mostrarMensaje("El Worker no pudo iniciarse. Procesando en modo alternativo...", "warning");
+            this.procesarDatosSinWorker(bufferSeguro);
+        }
+    },
+
+    configurarWorker(worker, buffer) {
+        this.worker = worker;
         this.worker.addEventListener("message", (evento) => this.procesarMensajeWorker(evento.data));
         this.worker.addEventListener("error", () => this.procesarErrorWorker());
         this.worker.postMessage(
             {
-                buffer: datos.buffer,
+                buffer,
                 totalRegistros: this.totalRegistros
             },
-            [datos.buffer]
+            [buffer]
         );
+    },
+
+    obtenerBufferRespaldo() {
+        if (!this.bufferRespaldo || this.bufferRespaldo.byteLength === 0) {
+            return null;
+        }
+
+        return this.bufferRespaldo.slice(0);
+    },
+
+    obtenerCodigoWorker() {
+        return `self.addEventListener("message", (evento) => {
+    if (!evento.data || !evento.data.buffer) {
+        return;
+    }
+
+    try {
+        procesarDatos(evento.data.buffer, evento.data.totalRegistros);
+    } catch (error) {
+        self.postMessage({
+            tipo: "error",
+            mensaje: error.message || "Error desconocido en el Worker."
+        });
+    }
+});
+
+function procesarDatos(buffer, totalRegistros) {
+    const datos = new Float32Array(buffer);
+
+    if (datos.length !== totalRegistros * 3) {
+        throw new Error("Cantidad de datos inválida.");
+    }
+
+    const resultados = {
+        totalRegistrosGenerados: totalRegistros,
+        registrosValidos: 0,
+        registrosInvalidos: 0,
+        promedioGeneral: 0,
+        top10Temperaturas: [],
+        top10Presiones: []
+    };
+
+    const tamanoBloque = 5000;
+    let indiceRegistro = 0;
+    let sumaTotal = 0;
+
+    function procesarBloque() {
+        try {
+            const limite = Math.min(indiceRegistro + tamanoBloque, totalRegistros);
+
+            for (; indiceRegistro < limite; indiceRegistro++) {
+                const posicion = indiceRegistro * 3;
+                const temperatura = datos[posicion];
+                const humedad = datos[posicion + 1];
+                const presion = datos[posicion + 2];
+
+                if (!Number.isFinite(temperatura) || !Number.isFinite(humedad) || !Number.isFinite(presion)) {
+                    throw new Error("Registro inválido.");
+                }
+
+                if (temperatura < 0 || humedad < 0 || presion < 0) {
+                    resultados.registrosInvalidos++;
+                    continue;
+                }
+
+                resultados.registrosValidos++;
+                sumaTotal += temperatura + humedad + presion;
+                insertarTop10(resultados.top10Temperaturas, temperatura);
+                insertarTop10(resultados.top10Presiones, presion);
+            }
+
+            self.postMessage({
+                tipo: "progreso",
+                porcentaje: Math.round((indiceRegistro / totalRegistros) * 100)
+            });
+
+            if (indiceRegistro < totalRegistros) {
+                setTimeout(procesarBloque, 0);
+                return;
+            }
+
+            resultados.promedioGeneral = resultados.registrosValidos > 0
+                ? sumaTotal / (resultados.registrosValidos * 3)
+                : 0;
+
+            self.postMessage({
+                tipo: "resultado",
+                resultados
+            });
+        } catch (error) {
+            self.postMessage({
+                tipo: "error",
+                mensaje: error.message || "Error desconocido en el Worker."
+            });
+        }
+    }
+
+    procesarBloque();
+}
+
+function insertarTop10(lista, valor) {
+    if (valor < 0) {
+        return;
+    }
+
+    lista.push(valor);
+    lista.sort((a, b) => b - a);
+
+    if (lista.length > 10) {
+        lista.length = 10;
+    }
+}`;
     },
 
     generarDatos() {
@@ -88,6 +252,11 @@ const nivel5 = {
 
         if (mensaje.tipo === "resultado") {
             this.finalizarProcesamiento(mensaje.resultados);
+            return;
+        }
+
+        if (mensaje.tipo === "error") {
+            this.procesarErrorWorker(mensaje.mensaje);
         }
     },
 
@@ -95,6 +264,7 @@ const nivel5 = {
         this.actualizarProgreso(100);
         this.elementos.botonProcesar.disabled = false;
         this.terminarWorkerActual();
+        this.bufferRespaldo = null;
 
         if (!this.sonResultadosValidos(resultados)) {
             this.mostrarMensaje("El Worker devolvió resultados incompletos.", "danger");
@@ -172,12 +342,112 @@ const nivel5 = {
     },
 
     procesarErrorWorker() {
+        const bufferSeguro = this.obtenerBufferRespaldo();
+        const estabaUsandoWorkerBlob = this.usandoWorkerBlob;
+
         this.terminarWorkerActual();
+
+        if (!estabaUsandoWorkerBlob && bufferSeguro) {
+            this.iniciarWorkerBlob(bufferSeguro);
+            return;
+        }
+
+        if (bufferSeguro) {
+            this.mostrarMensaje("El Worker falló. Procesando en modo alternativo...", "warning");
+            this.procesarDatosSinWorker(bufferSeguro);
+            return;
+        }
+
+        this.procesarErrorDefinitivo("Ocurrió un error durante el procesamiento del Worker.");
+    },
+
+    procesarErrorDefinitivo(mensaje) {
+        this.terminarWorkerActual();
+        this.bufferRespaldo = null;
         this.elementos.botonProcesar.disabled = false;
         this.elementos.botonDescargar.disabled = true;
         this.mostrarCiudadBloqueada();
-        this.mostrarMensaje("Ocurrió un error durante el procesamiento del Worker.", "danger");
+        this.mostrarMensaje(mensaje, "danger");
         mostrarIntentoFallido("Error del Worker");
+    },
+
+    procesarDatosSinWorker(buffer) {
+        const datos = new Float32Array(buffer);
+
+        if (datos.length !== this.totalRegistros * 3) {
+            this.procesarErrorDefinitivo("La cantidad de datos generada no es válida.");
+            return;
+        }
+
+        const resultados = {
+            totalRegistrosGenerados: this.totalRegistros,
+            registrosValidos: 0,
+            registrosInvalidos: 0,
+            promedioGeneral: 0,
+            top10Temperaturas: [],
+            top10Presiones: []
+        };
+
+        const tamanoBloque = 5000;
+        let indiceRegistro = 0;
+        let sumaTotal = 0;
+
+        const procesarBloque = () => {
+            try {
+                const limite = Math.min(indiceRegistro + tamanoBloque, this.totalRegistros);
+
+                for (; indiceRegistro < limite; indiceRegistro++) {
+                    const posicion = indiceRegistro * 3;
+                    const temperatura = datos[posicion];
+                    const humedad = datos[posicion + 1];
+                    const presion = datos[posicion + 2];
+
+                    if (!Number.isFinite(temperatura) || !Number.isFinite(humedad) || !Number.isFinite(presion)) {
+                        throw new Error("Registro inválido.");
+                    }
+
+                    if (temperatura < 0 || humedad < 0 || presion < 0) {
+                        resultados.registrosInvalidos++;
+                        continue;
+                    }
+
+                    resultados.registrosValidos++;
+                    sumaTotal += temperatura + humedad + presion;
+                    this.insertarTop10(resultados.top10Temperaturas, temperatura);
+                    this.insertarTop10(resultados.top10Presiones, presion);
+                }
+
+                this.actualizarProgreso((indiceRegistro / this.totalRegistros) * 100);
+
+                if (indiceRegistro < this.totalRegistros) {
+                    window.setTimeout(procesarBloque, 0);
+                    return;
+                }
+
+                resultados.promedioGeneral = resultados.registrosValidos > 0
+                    ? sumaTotal / (resultados.registrosValidos * 3)
+                    : 0;
+
+                this.finalizarProcesamiento(resultados);
+            } catch (error) {
+                this.procesarErrorDefinitivo("Ocurrió un error durante el procesamiento alternativo.");
+            }
+        };
+
+        procesarBloque();
+    },
+
+    insertarTop10(lista, valor) {
+        if (valor < 0) {
+            return;
+        }
+
+        lista.push(valor);
+        lista.sort((a, b) => b - a);
+
+        if (lista.length > 10) {
+            lista.length = 10;
+        }
     },
 
     reiniciarInterfazProcesamiento() {
@@ -216,12 +486,17 @@ const nivel5 = {
     },
 
     terminarWorkerActual() {
-        if (!this.worker) {
-            return;
+        if (this.worker) {
+            this.worker.terminate();
+            this.worker = null;
         }
 
-        this.worker.terminate();
-        this.worker = null;
+        if (this.urlWorkerBlob) {
+            URL.revokeObjectURL(this.urlWorkerBlob);
+            this.urlWorkerBlob = null;
+        }
+
+        this.usandoWorkerBlob = false;
     },
 
     mostrarCelebracionFinal() {
