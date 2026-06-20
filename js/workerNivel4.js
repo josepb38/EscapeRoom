@@ -3,7 +3,14 @@ self.addEventListener("message", (evento) => {
         return;
     }
 
-    procesarRegistros(evento.data.registros);
+    try {
+        procesarRegistros(evento.data.registros);
+    } catch (error) {
+        self.postMessage({
+            tipo: "error",
+            mensaje: error.message || "Error desconocido en el Worker."
+        });
+    }
 });
 
 function procesarRegistros(registros) {
