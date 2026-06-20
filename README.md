@@ -39,7 +39,7 @@ La cámara, geolocalización y Web Workers deben probarse desde `localhost` o un
 * Jose Paulino Colocho Baños        - CB11002
 * Luis Fernando Gonzalez Castaneda  - GC23100
 * Jose Enrique Valencia Erazo       - VE20008
-* 
+* Kenner Edilson Nuñez Melgar       - NM23016
 
 ## Uso académico
 
